@@ -28,9 +28,10 @@ Ensure that you have both tools installed before running the script. You should 
    
 ### How to Execute
 1. Save the script as a .bat file format on your computer.
-2. Open Command Prompt and navigate to the directory where you saved the script.
-3. open the script by clicking on it
-4. The script will start processing the ARW files, converting them to JPEG format, and transferring the metadata.
+2. Navigate to the directory where you saved the script.
+3. Copy the Script and paste it on a folder that contains ARW files.
+4. Open the script by clicking on it.
+5. The script will start processing the ARW files, converting them to JPEG format, and transferring the metadata.
 ## Note
 
 > The script pauses at the end of execution. Press any key to close the Command Prompt window after the conversion is complete.
