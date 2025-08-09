@@ -1,0 +1,43 @@
+name: Build WinForms EXE
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # If your project folder is named ArwToJpegGui as I suggested, restore will auto find the csproj
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish single file exe
+        run: >
+          dotnet publish ArwToJpegGui/ArwToJpegGui.csproj
+          -c Release
+          -r win-x64
+          -p:PublishSingleFile=true
+          -p:SelfContained=true
+          -p:PublishTrimmed=false
+
+      # Upload the exe and anything under a tools folder that you may later add to the publish output
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARWtoJPEGGui
+          path: |
+            **/bin/Release/net8.0-windows/win-x64/publish/*.exe
+            **/bin/Release/net8.0-windows/win-x64/publish/tools/**
