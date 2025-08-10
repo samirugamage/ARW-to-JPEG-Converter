@@ -1,41 +1,71 @@
-# ARW to JPEG Conversion Script
-This script automates the conversion of ARW (Sony RAW) image files to JPEG format, preserving the original image's metadata. It processes files in the current directory and its subdirectories, using ImageMagick and ExifTool to handle the conversion and metadata transfer, respectively.
+ARW to JPEG Converter (Windows GUI)
 
-## What It Does
+This Windows application converts Sony RAW (.ARW) images to JPEG while preserving all metadata from the original files.
+It uses ImageMagick for image conversion and ExifTool for metadata transfer.
+Features
 
-1. Finds ARW Files :Scans the current directory and all subdirectories for ARW files.
-2. Converts to JPEG: Converts each found ARW file into a JPEG file with 100% quality, preserving the highest possible image fidelity.
-3. Transfers Metadata: Copies all metadata from the original ARW file to the newly created JPEG file, ensuring that information like camera settings, date taken, and GPS data is not lost in the conversion process.
+    Batch Conversion – Process entire folders of .ARW files at once, with optional subfolder scanning.
 
-## How It Works
-The script utilizes a batch processing approach, leveraging Windows Batch File (.bat) scripting capabilities. It employs two external tools: ImageMagick for image conversion and ExifTool for metadata handling. The process involves iterating over each ARW file, converting it to JPEG, and then applying the metadata from the original file to the JPEG.
+    JPEG Quality Control – Set output quality (default 100%).
 
-## Prerequisites
-To use this script, you need:
+    Metadata Preservation – Camera settings, dates, GPS data, and other EXIF info are copied to the JPEG.
 
-1. Windows OS: The script is a .bat file, designed to run on Windows.
-2. [ImageMagick](https://imagemagick.org/script/download.php): This free software suite is used for converting images between formats. It must be installed and accessible from the command line.
-3. [ExifTool](https://exiftool.org/): A powerful tool to read, write, and edit meta information in a wide variety of files. It is required for transferring metadata.
-Ensure that you have both tools installed before running the script. You should also set the exifToolPath variable in the script to the location where ExifTool is installed on your system.
+    Custom Tool Paths – Easily set and save the paths to magick.exe and exiftool.exe.
 
-## Installation
+    Progress & Logs – View live conversion progress and detailed logs for each file.
 
-1. Install ImageMagick: Download and install from ImageMagick's official website.
-2. Install ExifTool: Download and install from ExifTool's official website.
-3. Rename the exiftool_versionNo.exe to exiftool.exe
-4. Configure Script: Edit the script to set the exifToolPath variable to the path where ExifTool is installed on your system.
+How It Works
 
-   
-### How to Execute
-1. Save the script as a .bat file format on your computer.
-2. Navigate to the directory where you saved the script.
-3. Copy the Script and paste it on a folder that contains ARW files.
-4. Open the script by clicking on it.
-5. The script will start processing the ARW files, converting them to JPEG format, and transferring the metadata.
-## Note
+    The app scans the chosen folder (and optionally subfolders) for .ARW files.
 
-> The script pauses at the end of execution. Press any key to close the Command Prompt window after the conversion is complete.
-Ensure that the paths to ImageMagick and ExifTool are correctly set and accessible from the command line for the script to function properly.
+    Each file is converted to JPEG with the selected quality using ImageMagick.
+
+    All metadata from the original .ARW is copied to the JPEG using ExifTool.
+
+    Conversion status is displayed in the log panel.
+
+Prerequisites
+
+You need two external tools:
+
+    ImageMagick – Download here
+
+    ExifTool – Download here (rename exiftool(-version).exe to exiftool.exe)
+
+    You can place both magick.exe and exiftool.exe inside a tools folder next to the ArwToJpegGui.exe file for automatic detection.
+
+Installation
+
+    Download the latest ArwToJpegGui.zip artifact from the GitHub Actions page (or Releases if available).
+
+    Extract the .zip file.
+
+    Place magick.exe and exiftool.exe in a folder named tools next to ArwToJpegGui.exe.
+
+    First run the app and set the paths to these tools if not auto-detected. Click Save paths to store them.
+
+Usage
+
+    Launch ArwToJpegGui.exe.
+
+    Select the folder containing .ARW files.
+
+    Choose whether to include subfolders.
+
+    Set JPEG quality (default is 100).
+
+    Click Start.
+
+    Monitor progress and logs in the app.
+
+Notes
+
+    The app stores your last used settings in settings.json next to the .exe.
+
+    SmartScreen may warn on first run — click “More info” → “Run anyway”.
+
+    Artifacts from GitHub Actions expire after a set period. For a permanent download, use a Release build if provided.
+
 License
 
-### MIT License - Feel free to use and modify this script as needed.
+MIT License — Free to use and modify.
