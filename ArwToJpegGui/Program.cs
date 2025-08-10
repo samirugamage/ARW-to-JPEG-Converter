@@ -1,15 +1,13 @@
-// ARW to JPEG GUI
-// Windows .exe without Python. Uses external tools: magick.exe (ImageMagick) and exiftool.exe.
-// Place portable copies in a "tools" folder next to the built .exe, or set paths in the UI.
-// Build: dotnet 8 SDK -> dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -p:PublishTrimmed=false
+// Program.cs
+// ARW to JPEG GUI using WinForms. No Python required.
+// Calls external tools: magick.exe and exiftool.exe.
+// Build with .NET 8 on Windows or via GitHub Actions.
 
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -19,26 +17,68 @@ internal static class Program
     [STAThread]
     static void Main()
     {
-        ApplicationConfiguration.Initialize();
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new MainForm());
+    }
+}
+
+public class AppSettings
+{
+    public string? MagickPath { get; set; }
+    public string? ExifPath { get; set; }
+    public string? LastInputDir { get; set; }
+    public int Quality { get; set; } = 100;
+    public bool Recurse { get; set; } = true;
+
+    public static string FilePath() => Path.Combine(AppContext.BaseDirectory, "settings.json");
+
+    public static AppSettings Load()
+    {
+        try
+        {
+            var p = FilePath();
+            if (File.Exists(p))
+            {
+                var json = File.ReadAllText(p);
+                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            }
+        }
+        catch { }
+        return new AppSettings();
+    }
+
+    public void Save()
+    {
+        try
+        {
+            var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(FilePath(), json);
+        }
+        catch { }
     }
 }
 
 public class MainForm : Form
 {
+    // UI
     TextBox txtInputDir = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     Button btnBrowseInput = new Button { Text = "Browse..." };
+
     CheckBox chkRecurse = new CheckBox { Text = "Include subfolders", Checked = true };
     Label lblQuality = new Label { Text = "JPEG quality" };
     NumericUpDown numQuality = new NumericUpDown { Minimum = 60, Maximum = 100, Value = 100 };
 
     TextBox txtMagick = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     Button btnMagick = new Button { Text = "Find magick.exe" };
+
     TextBox txtExif = new TextBox { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
     Button btnExif = new Button { Text = "Find exiftool.exe" };
 
     Button btnStart = new Button { Text = "Start" };
     Button btnCancel = new Button { Text = "Cancel", Enabled = false };
+    Button btnSave = new Button { Text = "Save paths" };
+
     ProgressBar progress = new ProgressBar { Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom, Minimum = 0, Maximum = 100 };
     TextBox txtLog = new TextBox { Multiline = true, ScrollBars = ScrollBars.Vertical, ReadOnly = true, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top | AnchorStyles.Bottom };
 
@@ -47,7 +87,7 @@ public class MainForm : Form
     public MainForm()
     {
         Text = "ARW to JPEG Converter";
-        Width = 900; Height = 600; MinimizeBox = true; MinimizeBox = true;
+        Width = 900; Height = 600; MinimizeBox = true; MaximizeBox = true;
 
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 8, Padding = new Padding(10) };
         for (int i = 0; i < 5; i++) panel.ColumnStyles.Add(new ColumnStyle(i == 4 ? SizeType.AutoSize : SizeType.Percent, i == 4 ? 0 : 25));
@@ -83,7 +123,7 @@ public class MainForm : Form
         panel.Controls.Add(txtExif, 1, 3);
         panel.Controls.Add(btnExif, 4, 3);
 
-        // Start/Cancel
+        // Start Cancel Save
         panel.Controls.Add(btnStart, 1, 4);
         panel.Controls.Add(btnCancel, 2, 4);
         panel.Controls.Add(btnSave, 3, 4);
@@ -99,7 +139,7 @@ public class MainForm : Form
 
         Controls.Add(panel);
 
-        // Defaults: look in tools folder
+        // Default tools path
         var baseDir = AppContext.BaseDirectory;
         var toolsDir = Path.Combine(baseDir, "tools");
         var defaultMagick = Path.Combine(toolsDir, "magick.exe");
@@ -107,6 +147,15 @@ public class MainForm : Form
         if (File.Exists(defaultMagick)) txtMagick.Text = defaultMagick;
         if (File.Exists(defaultExif)) txtExif.Text = defaultExif;
 
+        // Load saved settings
+        var s = AppSettings.Load();
+        if (!string.IsNullOrWhiteSpace(s.MagickPath) && File.Exists(s.MagickPath)) txtMagick.Text = s.MagickPath;
+        if (!string.IsNullOrWhiteSpace(s.ExifPath) && File.Exists(s.ExifPath)) txtExif.Text = s.ExifPath;
+        if (!string.IsNullOrWhiteSpace(s.LastInputDir) && Directory.Exists(s.LastInputDir)) txtInputDir.Text = s.LastInputDir;
+        if (s.Quality >= (int)numQuality.Minimum && s.Quality <= (int)numQuality.Maximum) numQuality.Value = s.Quality;
+        chkRecurse.Checked = s.Recurse;
+
+        // Events
         btnBrowseInput.Click += (_, __) =>
         {
             using var fbd = new FolderBrowserDialog();
@@ -116,6 +165,8 @@ public class MainForm : Form
         btnExif.Click += (_, __) => { var p = PickExe("exiftool.exe"); if (!string.IsNullOrEmpty(p)) txtExif.Text = p; };
         btnStart.Click += async (_, __) => await StartAsync();
         btnCancel.Click += (_, __) => cts?.Cancel();
+        btnSave.Click += (_, __) => SaveCurrentSettings();
+        this.FormClosing += (_, __) => SaveCurrentSettings();
     }
 
     string PickExe(string title)
@@ -126,6 +177,8 @@ public class MainForm : Form
 
     async Task StartAsync()
     {
+        SaveCurrentSettings();
+
         var input = txtInputDir.Text.Trim();
         if (string.IsNullOrWhiteSpace(input) || !Directory.Exists(input)) { MessageBox.Show("Select a valid input folder"); return; }
         if (!File.Exists(txtMagick.Text)) { MessageBox.Show("magick.exe not found"); return; }
@@ -146,6 +199,7 @@ public class MainForm : Form
             {
                 cts.Token.ThrowIfCancellationRequested();
                 var jpg = Path.ChangeExtension(arw, ".jpg");
+
                 Log($"Converting: {arw}");
                 var magickArgs = $"\"{arw}\" -quality {(int)numQuality.Value} \"{jpg}\"";
                 var ok1 = await RunTool(txtMagick.Text, magickArgs, cts.Token);
@@ -199,6 +253,19 @@ public class MainForm : Form
             var exit = await tcs.Task.ConfigureAwait(false);
             return exit == 0;
         }
+    }
+
+    void SaveCurrentSettings()
+    {
+        var set = new AppSettings
+        {
+            MagickPath = txtMagick.Text?.Trim(),
+            ExifPath = txtExif.Text?.Trim(),
+            LastInputDir = txtInputDir.Text?.Trim(),
+            Quality = (int)numQuality.Value,
+            Recurse = chkRecurse.Checked
+        };
+        set.Save();
     }
 
     void Log(string msg)
