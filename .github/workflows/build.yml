@@ -9,8 +9,11 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2025
+    runs-on: windows-2022
 
+    defaults:
+      run:
+        working-directory: ArwToJpegGui
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,24 +23,22 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # If your project folder is named ArwToJpegGui as I suggested, restore will auto find the csproj
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore ArwToJpegGui.csproj
 
       - name: Publish single file exe
         run: >
-          dotnet publish ArwToJpegGui/ArwToJpegGui.csproj
+          dotnet publish ArwToJpegGui.csproj
           -c Release
           -r win-x64
           -p:PublishSingleFile=true
           -p:SelfContained=true
           -p:PublishTrimmed=false
 
-      # Upload the exe and anything under a tools folder that you may later add to the publish output
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ARWtoJPEGGui
           path: |
-            **/bin/Release/net8.0-windows/win-x64/publish/*.exe
-            **/bin/Release/net8.0-windows/win-x64/publish/tools/**
+            ArwToJpegGui/bin/Release/net8.0-windows/win-x64/publish/*.exe
+            ArwToJpegGui/bin/Release/net8.0-windows/win-x64/publish/tools/**
