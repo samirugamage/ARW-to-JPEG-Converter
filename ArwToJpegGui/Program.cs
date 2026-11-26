@@ -1,5 +1,5 @@
 // Program.cs
-// ARW to JPEG GUI using WinForms. No Python required.
+// ARW to JPEG GUI using WinForms (.NET 8). No Python required.
 // Two conversion engines:
 //   RawTherapee (rawtherapee-cli.exe): full RAW development with lens correction,
 //     highlight recovery and camera-like tones. Best look, slower.
@@ -12,6 +12,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -25,13 +26,14 @@ internal static class Program
     [STAThread]
     static void Main()
     {
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new MainForm());
     }
 }
 
-// Order matches the items in the Engine drop-down.
+// Order matters: saved in settings by name.
 public enum ConvertEngine { RawTherapee = 0, ImageMagick = 1 }
 
 public class AppSettings
@@ -44,6 +46,9 @@ public class AppSettings
     public string? MagickPath { get; set; }
     public string? ExifPath { get; set; }
     public string? LastInputDir { get; set; }
+    public bool OutputToFolder { get; set; }
+    public string? OutputDir { get; set; }
+    public bool SkipExisting { get; set; } = true;
     public int Quality { get; set; } = 90;
     public bool Recurse { get; set; } = true;
     public int Jobs { get; set; } = DefaultJobs();
@@ -84,6 +89,368 @@ public class AppSettings
     }
 }
 
+// ======================================================================
+//  Look and feel
+// ======================================================================
+
+static class Theme
+{
+    public static readonly Color Page = Color.FromArgb(236, 241, 247);
+    public static readonly Color Card = Color.White;
+    public static readonly Color Border = Color.FromArgb(214, 222, 233);
+    public static readonly Color Text = Color.FromArgb(17, 24, 39);
+    public static readonly Color Muted = Color.FromArgb(100, 116, 139);
+    public static readonly Color Accent = Color.FromArgb(37, 99, 235);
+    public static readonly Color Good = Color.FromArgb(22, 163, 74);
+    public static readonly Color Bad = Color.FromArgb(220, 38, 38);
+    public static readonly Color Slate = Color.FromArgb(100, 116, 139);
+    public static readonly Color Violet = Color.FromArgb(124, 58, 237);
+    public static readonly Color LogBack = Color.FromArgb(17, 24, 39);
+    public static readonly Color LogText = Color.FromArgb(209, 213, 219);
+
+    public static readonly Font Body = new("Segoe UI", 9.75f);
+    public static readonly Font Small = new("Segoe UI", 8.75f);
+    public static readonly Font Strong = new("Segoe UI Semibold", 9.75f);
+    public static readonly Font Status = new("Segoe UI Semibold", 10.5f);
+    public static readonly Font CardTitle = new("Segoe UI Semibold", 11.25f);
+    public static readonly Font HeaderTitle = new("Segoe UI Semibold", 17f);
+    public static readonly Font Big = new("Segoe UI Semibold", 15f);
+    public static readonly Font Mono = new("Consolas", 9.5f);
+    public static readonly Font Icons = new("Segoe MDL2 Assets", 10f);
+    public static readonly Font IconsSmall = new("Segoe MDL2 Assets", 8f);
+    public static readonly Font IconsLarge = new("Segoe MDL2 Assets", 20f);
+
+    public static GraphicsPath Round(RectangleF r, float radius)
+    {
+        var d = Math.Min(radius * 2, Math.Min(r.Width, r.Height));
+        var p = new GraphicsPath();
+        if (d <= 1) { p.AddRectangle(r); return p; }
+        p.AddArc(r.X, r.Y, d, d, 180, 90);
+        p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        p.CloseFigure();
+        return p;
+    }
+
+    public static Color Mix(Color a, Color b, float t) => Color.FromArgb(
+        (int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+    public static Color Lighter(Color c, float t) => Mix(c, Color.White, t);
+    public static Color Darker(Color c, float t) => Mix(c, Color.Black, t);
+
+    // Paints a white "glass" shine over the top half of a shape.
+    public static void Gloss(Graphics g, GraphicsPath shape, RectangleF r, int topAlpha, int bottomAlpha)
+    {
+        var state = g.Save();
+        g.SetClip(shape);
+        var top = new RectangleF(r.X, r.Y, r.Width, Math.Max(1, r.Height / 2));
+        using (var brush = new LinearGradientBrush(new RectangleF(top.X, top.Y - 1, top.Width, top.Height + 2),
+                   Color.FromArgb(topAlpha, Color.White), Color.FromArgb(bottomAlpha, Color.White), 90f))
+            g.FillRectangle(brush, top);
+        g.Restore(state);
+    }
+
+    public const TextFormatFlags Line = TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
+}
+
+// Gradient title band with a glass shine.
+sealed class HeaderBand : Panel
+{
+    public HeaderBand()
+    {
+        DoubleBuffered = true;
+        Dock = DockStyle.Top;
+        Height = 84;
+        SetStyle(ControlStyles.ResizeRedraw, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        var r = ClientRectangle;
+        if (r.Width < 2 || r.Height < 2) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = DeviceDpi / 96f;
+
+        using (var bg = new LinearGradientBrush(r, Color.FromArgb(30, 64, 175), Color.FromArgb(91, 33, 182), 0f))
+            g.FillRectangle(bg, r);
+        using (var shape = new GraphicsPath())
+        {
+            shape.AddRectangle(r);
+            Theme.Gloss(g, shape, r, 70, 10);
+        }
+
+        var tile = new RectangleF(20 * s, (r.Height - 50 * s) / 2, 50 * s, 50 * s);
+        using (var tilePath = Theme.Round(tile, 13 * s))
+        {
+            using (var tileBrush = new SolidBrush(Color.FromArgb(50, Color.White))) g.FillPath(tileBrush, tilePath);
+            Theme.Gloss(g, tilePath, tile, 70, 0);
+            using (var tilePen = new Pen(Color.FromArgb(90, Color.White))) g.DrawPath(tilePen, tilePath);
+        }
+        TextRenderer.DrawText(g, "", Theme.IconsLarge, Rectangle.Round(tile), Color.White,
+            Theme.Line | TextFormatFlags.HorizontalCenter);
+
+        int x = (int)(tile.Right + 16 * s);
+        TextRenderer.DrawText(g, "ARW → JPEG Converter", Theme.HeaderTitle,
+            new Rectangle(x, (int)(r.Height / 2 - 34 * s), r.Width - x, (int)(34 * s)), Color.White,
+            TextFormatFlags.SingleLine | TextFormatFlags.Bottom | TextFormatFlags.NoPadding);
+        TextRenderer.DrawText(g, "Sony RAW photos to small, high-quality JPEGs, with all the photo details kept", Theme.Body,
+            new Rectangle(x, (int)(r.Height / 2 + 4 * s), r.Width - x, (int)(22 * s)), Color.FromArgb(224, 231, 255),
+            TextFormatFlags.SingleLine | TextFormatFlags.Top | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
+    }
+}
+
+// White rounded card with an optional step number and a title.
+sealed class Card : TableLayoutPanel
+{
+    readonly string? step;
+    readonly string title;
+
+    public Card(string? step, string title)
+    {
+        this.step = step;
+        this.title = title;
+        DoubleBuffered = true;
+        BackColor = Theme.Card;
+        AutoSize = true;
+        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        Dock = DockStyle.Fill;
+        Margin = new Padding(0, 0, 0, 14);
+        Padding = new Padding(18, 48, 18, 16);
+        ColumnCount = 1;
+        ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        SetStyle(ControlStyles.ResizeRedraw, true);
+    }
+
+    public void AddRow(Control c, bool fill = false)
+    {
+        RowStyles.Add(fill ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
+        RowCount = RowStyles.Count;
+        Controls.Add(c, 0, RowCount - 1);
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Page);
+        if (Width < 8 || Height < 8) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = DeviceDpi / 96f;
+
+        var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f - 3 * s);
+        using (var shadowPath = Theme.Round(new RectangleF(r.X, r.Y + 3 * s, r.Width, r.Height), 11 * s))
+        using (var shadow = new SolidBrush(Color.FromArgb(22, 15, 23, 42)))
+            g.FillPath(shadow, shadowPath);
+        using (var path = Theme.Round(r, 11 * s))
+        {
+            using (var fill = new SolidBrush(Theme.Card)) g.FillPath(fill, path);
+            using (var pen = new Pen(Theme.Border)) g.DrawPath(pen, path);
+        }
+
+        float x = 18 * s;
+        if (step != null)
+        {
+            var dot = new RectangleF(x, 13 * s, 24 * s, 24 * s);
+            using (var dotPath = new GraphicsPath())
+            {
+                dotPath.AddEllipse(dot);
+                using (var dotBrush = new LinearGradientBrush(dot, Theme.Lighter(Theme.Accent, 0.2f), Theme.Darker(Theme.Accent, 0.15f), 90f))
+                    g.FillPath(dotBrush, dotPath);
+                Theme.Gloss(g, dotPath, dot, 110, 20);
+            }
+            TextRenderer.DrawText(g, step, Theme.Strong, Rectangle.Round(dot), Color.White, Theme.Line | TextFormatFlags.HorizontalCenter);
+            x = dot.Right + 10 * s;
+        }
+        TextRenderer.DrawText(g, title, Theme.CardTitle, new Rectangle((int)x, (int)(12 * s), Width - (int)x, (int)(26 * s)), Theme.Text, Theme.Line);
+    }
+}
+
+// Rounded gradient button with a glossy top half and an optional icon.
+sealed class GlossyButton : Button
+{
+    bool hover, pressed;
+    public Color BaseColor { get; set; } = Theme.Accent;
+    public bool Light { get; set; }
+    public string? Glyph { get; set; }
+
+    public static GlossyButton Browse() => new()
+    {
+        Text = "Browse",
+        Glyph = "",
+        Light = true,
+        Size = new Size(104, 30),
+        Margin = new Padding(8, 2, 0, 2),
+    };
+
+    public GlossyButton()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        FlatStyle = FlatStyle.Flat;
+        FlatAppearance.BorderSize = 0;
+        Font = Theme.Strong;
+        Cursor = Cursors.Hand;
+        UseVisualStyleBackColor = false;
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; pressed = false; Invalidate(); base.OnMouseLeave(e); }
+    protected override void OnMouseDown(MouseEventArgs e) { pressed = true; Invalidate(); base.OnMouseDown(e); }
+    protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+    protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Page);
+        if (Width < 6 || Height < 6) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = DeviceDpi / 96f;
+        var rect = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+
+        Color face = Light ? Color.FromArgb(248, 250, 252) : BaseColor;
+        if (!Enabled) face = Light ? Color.FromArgb(241, 245, 249) : Color.FromArgb(203, 213, 225);
+        else if (pressed) face = Theme.Darker(face, 0.12f);
+        else if (hover) face = Light ? Color.FromArgb(239, 246, 255) : Theme.Lighter(face, 0.12f);
+
+        using var path = Theme.Round(rect, 8 * s);
+        using (var fill = new LinearGradientBrush(rect, Theme.Lighter(face, 0.15f), Theme.Darker(face, Light ? 0.04f : 0.14f), 90f))
+            g.FillPath(fill, path);
+        Theme.Gloss(g, path, rect, Light ? 140 : 85, Light ? 30 : 12);
+        var border = Light ? (hover && Enabled ? Theme.Accent : Theme.Border) : Theme.Darker(face, 0.22f);
+        using (var pen = new Pen(border)) g.DrawPath(pen, path);
+
+        var color = !Enabled ? (Light ? Color.FromArgb(148, 163, 184) : Color.White) : Light ? Theme.Text : Color.White;
+        var textSize = TextRenderer.MeasureText(g, Text, Font, Size, Theme.Line);
+        var glyphSize = string.IsNullOrEmpty(Glyph) ? Size.Empty : TextRenderer.MeasureText(g, Glyph, Theme.Icons, Size, Theme.Line);
+        int gap = glyphSize.IsEmpty ? 0 : (int)(8 * s);
+        int x = (Width - (glyphSize.Width + gap + textSize.Width)) / 2;
+        if (!glyphSize.IsEmpty)
+            TextRenderer.DrawText(g, Glyph, Theme.Icons, new Rectangle(x, 0, glyphSize.Width, Height), color, Theme.Line);
+        TextRenderer.DrawText(g, Text, Font, new Rectangle(x + glyphSize.Width + gap, 0, textSize.Width + 2, Height), color, Theme.Line);
+    }
+}
+
+// Rounded progress bar with a glossy fill.
+sealed class GlossyProgress : Control
+{
+    int current, max = 100;
+
+    public int Value { get => current; set { current = Math.Clamp(value, 0, max); Invalidate(); } }
+    public int Maximum { get => max; set { max = Math.Max(1, value); current = Math.Min(current, max); Invalidate(); } }
+
+    public GlossyProgress()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 14;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Card);
+        if (Width < 4 || Height < 4) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+        using (var track = Theme.Round(r, r.Height / 2))
+        using (var trackBrush = new LinearGradientBrush(r, Color.FromArgb(220, 226, 235), Color.FromArgb(236, 240, 245), 90f))
+            g.FillPath(trackBrush, track);
+        if (current <= 0) return;
+        var fillRect = new RectangleF(r.X, r.Y, Math.Max(r.Height, r.Width * current / max), r.Height);
+        using var fillPath = Theme.Round(fillRect, r.Height / 2);
+        using (var fill = new LinearGradientBrush(fillRect, Theme.Lighter(Theme.Accent, 0.25f), Theme.Darker(Theme.Accent, 0.1f), 90f))
+            g.FillPath(fill, fillPath);
+        Theme.Gloss(g, fillPath, fillRect, 120, 20);
+    }
+}
+
+// Small coloured tile showing one number (converted, skipped, saved, time).
+sealed class StatTile : Control
+{
+    readonly Color tint;
+    string caption, shown = "-";
+
+    public StatTile(string caption, Color tint)
+    {
+        this.caption = caption;
+        this.tint = tint;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = 76;
+        Margin = new Padding(0, 0, 8, 0);
+        Anchor = AnchorStyles.Left | AnchorStyles.Right;
+    }
+
+    public string Shown { get => shown; set { if (shown != value) { shown = value; Invalidate(); } } }
+    public string Caption { get => caption; set { if (caption != value) { caption = value; Invalidate(); } } }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Card);
+        if (Width < 8 || Height < 8) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = DeviceDpi / 96f;
+        var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+        using var path = Theme.Round(r, 9 * s);
+        using (var fill = new LinearGradientBrush(r, Theme.Lighter(tint, 0.94f), Theme.Lighter(tint, 0.84f), 90f))
+            g.FillPath(fill, path);
+        Theme.Gloss(g, path, r, 120, 15);
+        using (var pen = new Pen(Theme.Lighter(tint, 0.65f))) g.DrawPath(pen, path);
+        int pad = (int)(12 * s);
+        TextRenderer.DrawText(g, shown, Theme.Big, new Rectangle(pad, (int)(8 * s), Width - 2 * pad, (int)(32 * s)),
+            Theme.Darker(tint, 0.25f), Theme.Line | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, caption, Theme.Small, new Rectangle(pad, (int)(44 * s), Width - 2 * pad, (int)(20 * s)),
+            Theme.Muted, Theme.Line | TextFormatFlags.EndEllipsis);
+    }
+}
+
+// Pill showing whether a tool was found.
+sealed class ToolChip : Control
+{
+    public enum ChipState { Found, Missing, NotNeeded }
+    ChipState state = ChipState.Missing;
+
+    public ToolChip(string name)
+    {
+        Text = name;
+        Font = Theme.Strong;
+        AutoSize = true;
+        Margin = new Padding(0, 0, 8, 0);
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    }
+
+    public ChipState State { get => state; set { if (state != value) { state = value; Invalidate(); } } }
+
+    public override Size GetPreferredSize(Size proposedSize)
+    {
+        float s = DeviceDpi / 96f;
+        var t = TextRenderer.MeasureText(Text, Font);
+        return new Size(t.Width + (int)(36 * s), (int)(28 * s));
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.Clear(Parent?.BackColor ?? Theme.Card);
+        if (Width < 8 || Height < 8) return;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float s = DeviceDpi / 96f;
+        var color = state switch { ChipState.Found => Theme.Good, ChipState.Missing => Theme.Bad, _ => Theme.Muted };
+        var glyph = state switch { ChipState.Found => "", ChipState.Missing => "", _ => "" };
+        var r = new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f);
+        using var path = Theme.Round(r, r.Height / 2);
+        using (var fill = new SolidBrush(Theme.Lighter(color, 0.9f))) g.FillPath(fill, path);
+        using (var pen = new Pen(Theme.Lighter(color, 0.55f))) g.DrawPath(pen, path);
+        int x = (int)(11 * s);
+        TextRenderer.DrawText(g, glyph, Theme.IconsSmall, new Rectangle(x, 0, (int)(14 * s), Height), color, Theme.Line);
+        TextRenderer.DrawText(g, Text, Font, new Rectangle(x + (int)(18 * s), 0, Width - x - (int)(18 * s), Height),
+            state == ChipState.NotNeeded ? Theme.Muted : Theme.Darker(color, 0.3f), Theme.Line);
+    }
+}
+
+// ======================================================================
+//  Main window
+// ======================================================================
+
 public class MainForm : Form
 {
     // ---- ImageMagick engine ----
@@ -114,39 +481,67 @@ public class MainForm : Form
 
     static readonly Encoding Utf8NoBom = new UTF8Encoding(false);
 
-    // UI
-    TextBox txtInputDir = new TextBox { Dock = DockStyle.Fill };
-    Button btnBrowseInput = new Button { Text = "Browse...", AutoSize = true };
+    // ---- step 1: photos ----
+    readonly TextBox txtInput = NewTextBox("Choose the folder with your ARW photos");
+    readonly GlossyButton btnInput = GlossyButton.Browse();
+    readonly CheckBox chkRecurse = NewCheck("Include subfolders", true);
 
-    ComboBox cboEngine = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 460 };
+    // ---- step 2: output ----
+    readonly RadioButton optNextTo = NewRadio("Next to each ARW file", Theme.Body, true);
+    readonly RadioButton optFolder = NewRadio("In this folder:", Theme.Body, false);
+    readonly TextBox txtOutput = NewTextBox("Choose where to save the JPEGs");
+    readonly GlossyButton btnOutput = GlossyButton.Browse();
+    readonly CheckBox chkSkip = NewCheck("Skip photos that already have a JPEG", true);
 
-    CheckBox chkRecurse = new CheckBox { Text = "Include subfolders", Checked = true, AutoSize = true };
-    NumericUpDown numQuality = new NumericUpDown { Minimum = 50, Maximum = 100, Value = 90, Width = 60 };
-    NumericUpDown numJobs = new NumericUpDown { Minimum = 1, Maximum = Math.Max(1, Environment.ProcessorCount), Value = AppSettings.DefaultJobs(), Width = 60 };
+    // ---- step 3: conversion ----
+    readonly RadioButton optRt = NewRadio("RawTherapee: best look", Theme.Strong, true);
+    readonly RadioButton optIm = NewRadio("ImageMagick: fastest", Theme.Strong, false);
+    readonly TrackBar trkQuality = new()
+    {
+        Minimum = 50, Maximum = 100, Value = 90, TickStyle = TickStyle.None, AutoSize = false,
+        Size = new Size(165, 30), BackColor = Theme.Card, SmallChange = 1, LargeChange = 5, Margin = new Padding(0),
+    };
+    readonly Label lblQuality = new() { Text = "90", Font = Theme.Strong, ForeColor = Theme.Text, AutoSize = false, Size = new Size(34, 30), TextAlign = ContentAlignment.MiddleLeft };
+    readonly NumericUpDown numJobs = new() { Minimum = 1, Maximum = Math.Max(1, Environment.ProcessorCount), Value = AppSettings.DefaultJobs(), Width = 56, Margin = new Padding(0, 3, 10, 3) };
 
-    TextBox txtRt = new TextBox { Dock = DockStyle.Fill };
-    Button btnRt = new Button { Text = "Find rawtherapee-cli.exe", AutoSize = true };
+    // ---- tools ----
+    readonly TextBox txtRt = NewTextBox("Path to rawtherapee-cli.exe");
+    readonly TextBox txtMagick = NewTextBox("Path to magick.exe");
+    readonly TextBox txtExif = NewTextBox("Path to exiftool.exe");
+    readonly GlossyButton btnRt = GlossyButton.Browse(), btnMagick = GlossyButton.Browse(), btnExif = GlossyButton.Browse();
+    readonly ToolChip chipRt = new("RawTherapee"), chipMagick = new("ImageMagick"), chipExif = new("ExifTool");
+    readonly LinkLabel lnkTools = new() { Text = "Edit paths", AutoSize = true, LinkColor = Theme.Accent, ActiveLinkColor = Theme.Darker(Theme.Accent, 0.2f), Margin = new Padding(4, 0, 0, 0) };
+    readonly TableLayoutPanel toolPaths = new() { ColumnCount = 2, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Visible = false, Margin = new Padding(0, 10, 0, 0) };
 
-    TextBox txtMagick = new TextBox { Dock = DockStyle.Fill };
-    Button btnMagick = new Button { Text = "Find magick.exe", AutoSize = true };
+    // ---- step 4: run ----
+    readonly GlossyButton btnStart = new() { Text = "Start converting", Glyph = "", Size = new Size(210, 46), Margin = new Padding(0, 0, 10, 0) };
+    readonly GlossyButton btnCancel = new() { Text = "Cancel", Glyph = "", BaseColor = Theme.Slate, Size = new Size(120, 46), Enabled = false, Margin = new Padding(0) };
+    readonly Label lblStatus = new() { Text = "Ready", Font = Theme.Status, ForeColor = Theme.Text, AutoSize = true, Margin = new Padding(0, 14, 0, 0) };
+    readonly GlossyProgress progress = new() { Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(0, 8, 0, 14) };
+    readonly StatTile tileDone = new("Converted", Theme.Accent);
+    readonly StatTile tileSkipped = new("Skipped", Theme.Slate);
+    readonly StatTile tileSaved = new("Space saved", Theme.Good);
+    readonly StatTile tileTime = new("Time", Theme.Violet) { Margin = new Padding(0) };
+    readonly TextBox txtLog = new()
+    {
+        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true, BorderStyle = BorderStyle.None,
+        BackColor = Theme.LogBack, ForeColor = Theme.LogText, Font = Theme.Mono, Dock = DockStyle.Fill,
+    };
 
-    TextBox txtExif = new TextBox { Dock = DockStyle.Fill };
-    Button btnExif = new Button { Text = "Find exiftool.exe", AutoSize = true };
-
-    Button btnStart = new Button { Text = "Start", AutoSize = true };
-    Button btnCancel = new Button { Text = "Cancel", Enabled = false, AutoSize = true };
-    Button btnSave = new Button { Text = "Save paths", AutoSize = true };
-
-    ProgressBar progress = new ProgressBar { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100 };
-    TextBox txtLog = new TextBox { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, ReadOnly = true, Dock = DockStyle.Fill };
+    readonly TableLayoutPanel leftStack = new() { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Top, Margin = new Padding(0) };
+    readonly System.Windows.Forms.Timer clockTimer = new() { Interval = 1000 };
 
     CancellationTokenSource? cts;
+    RunStats? current;
+    Stopwatch? runClock;
+    int runTotal;
+    int countVersion;
 
     sealed class RunStats
     {
         public long ArwBytes, JpgBytes;
-        public int Done, Converted, Failed, Larger;
-        public readonly ConcurrentQueue<string> Jpegs = new();
+        public int Done, Converted, Failed, Larger, Skipped;
+        public readonly ConcurrentQueue<(string Arw, string Jpg)> Pairs = new();
     }
 
     sealed record ToolCommand(string Exe, string Args, string Note);
@@ -158,102 +553,324 @@ public class MainForm : Form
 
     public MainForm()
     {
+        AutoScaleDimensions = new SizeF(96F, 96F);
+        AutoScaleMode = AutoScaleMode.Dpi;
         Text = "ARW to JPEG Converter";
-        Width = 920; Height = 680; MinimizeBox = true; MaximizeBox = true;
+        Font = Theme.Body;
+        ForeColor = Theme.Text;
+        BackColor = Theme.Page;
+        ClientSize = new Size(1120, 820);
+        MinimumSize = new Size(940, 660);
+        StartPosition = FormStartPosition.CenterScreen;
+        DoubleBuffered = true;
 
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(10) };
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));     // labels
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // inputs
-        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));     // buttons
+        // ---- 1: photos ----
+        var cardPhotos = new Card("1", "Choose photos");
+        cardPhotos.AddRow(PathRow(txtInput, btnInput));
+        chkRecurse.Margin = new Padding(0, 8, 0, 0);
+        cardPhotos.AddRow(chkRecurse);
 
-        int row = 0;
-        void AddRow(string? label, Control main, Control? right = null, bool fill = false)
+        // ---- 2: output ----
+        var cardOutput = new Card("2", "Where to save the JPEGs");
+        cardOutput.AddRow(optNextTo);
+        cardOutput.AddRow(optFolder);
+        cardOutput.AddRow(PathRow(txtOutput, btnOutput, indent: 20));
+        cardOutput.AddRow(Hint("Subfolders are recreated inside this folder.", 20));
+        chkSkip.Margin = new Padding(0, 12, 0, 0);
+        cardOutput.AddRow(chkSkip);
+        cardOutput.AddRow(Hint("Turn off to convert again and replace existing JPEGs.", 20));
+
+        // ---- 3: conversion ----
+        var cardConvert = new Card("3", "Conversion");
+        cardConvert.AddRow(optRt);
+        cardConvert.AddRow(Hint("Lens correction, camera-like colors, ISO-based noise reduction.", 20));
+        optIm.Margin = new Padding(0, 8, 0, 0);
+        cardConvert.AddRow(optIm);
+        cardConvert.AddRow(Hint("Plain, flatter look. About 3x faster.", 20));
+        var qualityRow = HRow(FieldLabel("JPEG quality"), trkQuality, lblQuality, Hint("88-92 recommended"));
+        qualityRow.Margin = new Padding(0, 14, 0, 0);
+        cardConvert.AddRow(qualityRow);
+        cardConvert.AddRow(HRow(FieldLabel("Parallel jobs"), numJobs, Hint("photos converted at the same time")));
+
+        // ---- tools ----
+        var cardTools = new Card(null, "Tools");
+        cardTools.AddRow(HRow(chipRt, chipMagick, chipExif, lnkTools));
+        toolPaths.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        toolPaths.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        AddToolRow("RawTherapee", txtRt, btnRt);
+        AddToolRow("ImageMagick", txtMagick, btnMagick);
+        AddToolRow("ExifTool", txtExif, btnExif);
+        cardTools.AddRow(toolPaths);
+
+        leftStack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        foreach (var card in new[] { cardPhotos, cardOutput, cardConvert })
         {
-            panel.RowStyles.Add(fill ? new RowStyle(SizeType.Percent, 100) : new RowStyle(SizeType.AutoSize));
-            if (label != null) panel.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left }, 0, row);
-            panel.Controls.Add(main, 1, row);
-            if (right != null) panel.Controls.Add(right, 2, row);
-            else panel.SetColumnSpan(main, 2);
-            row++;
+            leftStack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            leftStack.Controls.Add(card, 0, leftStack.RowStyles.Count - 1);
         }
+        leftStack.RowCount = leftStack.RowStyles.Count;
+        var leftScroll = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0, 0, 8, 0), BackColor = Theme.Page };
+        leftScroll.Controls.Add(leftStack);
 
-        static Label InlineLabel(string text) => new Label { Text = text, AutoSize = true, Margin = new Padding(16, 6, 3, 3) };
-
-        cboEngine.Items.AddRange(new object[]
+        // ---- 4: run ----
+        var cardRun = new Card("4", "Convert");
+        cardRun.AddRow(HRow(btnStart, btnCancel));
+        cardRun.AddRow(lblStatus);
+        cardRun.AddRow(progress);
+        var tiles = new TableLayoutPanel { ColumnCount = 4, RowCount = 1, Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
+        tiles.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        var tileList = new[] { tileDone, tileSkipped, tileSaved, tileTime };
+        for (int i = 0; i < tileList.Length; i++)
         {
-            "RawTherapee - best look: lens correction, camera-like tones (slower)",
-            "ImageMagick - fastest, plain look",
-        });
+            tiles.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+            tiles.Controls.Add(tileList[i], i, 0);
+        }
+        cardRun.AddRow(tiles);
 
-        var options = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        options.Controls.Add(chkRecurse);
-        options.Controls.Add(InlineLabel("JPEG quality"));
-        options.Controls.Add(numQuality);
-        options.Controls.Add(InlineLabel("Parallel jobs"));
-        options.Controls.Add(numJobs);
+        var cardLog = new Card(null, "Activity log") { AutoSize = false, Margin = new Padding(0) };
+        var logHost = new Panel { Dock = DockStyle.Fill, BackColor = Theme.LogBack, Padding = new Padding(12, 10, 4, 10), Margin = new Padding(0) };
+        logHost.Controls.Add(txtLog);
+        cardLog.AddRow(logHost, fill: true);
 
-        var hint = new Label
-        {
-            AutoSize = true,
-            MaximumSize = new Size(740, 0),
-            ForeColor = SystemColors.GrayText,
-            Text = "Quality 88-92 looks the same as 100 on photos at a fraction of the size. " +
-                   "RawTherapee is about 3x slower than ImageMagick. Each parallel job can use 1-1.5 GB of RAM."
-        };
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = new Padding(8, 0, 0, 0), BackColor = Theme.Page };
+        right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        right.Controls.Add(cardRun, 0, 0);
+        right.Controls.Add(cardTools, 0, 1);
+        right.Controls.Add(cardLog, 0, 2);
 
-        var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        buttons.Controls.Add(btnStart);
-        buttons.Controls.Add(btnCancel);
-        buttons.Controls.Add(btnSave);
+        var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(16, 16, 16, 16), BackColor = Theme.Page };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 46));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 54));
+        body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        body.Controls.Add(leftScroll, 0, 0);
+        body.Controls.Add(right, 1, 0);
 
-        AddRow("Input folder", txtInputDir, btnBrowseInput);
-        AddRow("Engine", cboEngine);
-        AddRow("Options", options);
-        AddRow(null, hint);
-        AddRow("rawtherapee-cli.exe", txtRt, btnRt);
-        AddRow("magick.exe", txtMagick, btnMagick);
-        AddRow("exiftool.exe", txtExif, btnExif);
-        AddRow(null, buttons);
-        AddRow(null, progress);
-        AddRow(null, txtLog, fill: true);
-        panel.RowCount = row;
+        Controls.Add(body);              // fills what the header leaves
+        Controls.Add(new HeaderBand());  // docked to the top
 
-        Controls.Add(panel);
-
-        // Default tool paths: a "tools" folder next to the app, else an installed copy.
+        // ---- default tool paths: "tools" folder next to the app, else an installed copy ----
         var toolsDir = Path.Combine(AppContext.BaseDirectory, "tools");
         txtRt.Text = FindRawTherapee(toolsDir);
         txtMagick.Text = FindTool(toolsDir, "magick.exe");
         txtExif.Text = FindTool(toolsDir, "exiftool.exe");
 
-        // Load saved settings
+        // ---- saved settings ----
         var s = AppSettings.Load();
         if (!string.IsNullOrWhiteSpace(s.RawTherapeePath) && File.Exists(s.RawTherapeePath)) txtRt.Text = s.RawTherapeePath;
         if (!string.IsNullOrWhiteSpace(s.MagickPath) && File.Exists(s.MagickPath)) txtMagick.Text = s.MagickPath;
         if (!string.IsNullOrWhiteSpace(s.ExifPath) && File.Exists(s.ExifPath)) txtExif.Text = s.ExifPath;
-        if (!string.IsNullOrWhiteSpace(s.LastInputDir) && Directory.Exists(s.LastInputDir)) txtInputDir.Text = s.LastInputDir;
-        if (s.Quality >= numQuality.Minimum && s.Quality <= numQuality.Maximum) numQuality.Value = s.Quality;
+        if (!string.IsNullOrWhiteSpace(s.LastInputDir) && Directory.Exists(s.LastInputDir)) txtInput.Text = s.LastInputDir;
+        txtOutput.Text = s.OutputDir ?? "";
+        optFolder.Checked = s.OutputToFolder;
+        optNextTo.Checked = !s.OutputToFolder;
+        chkSkip.Checked = s.SkipExisting;
+        if (s.Quality >= trkQuality.Minimum && s.Quality <= trkQuality.Maximum) trkQuality.Value = s.Quality;
+        lblQuality.Text = trkQuality.Value.ToString();
         if (s.Jobs >= numJobs.Minimum && s.Jobs <= numJobs.Maximum) numJobs.Value = s.Jobs;
         chkRecurse.Checked = s.Recurse;
         // No saved engine yet: use RawTherapee when it is installed.
-        cboEngine.SelectedIndex = Enum.TryParse<ConvertEngine>(s.Engine, out var saved) && Enum.IsDefined(saved)
-            ? (int)saved
-            : (int)(File.Exists(txtRt.Text) ? ConvertEngine.RawTherapee : ConvertEngine.ImageMagick);
+        var engine = Enum.TryParse<ConvertEngine>(s.Engine, out var saved) && Enum.IsDefined(saved)
+            ? saved
+            : File.Exists(txtRt.Text) ? ConvertEngine.RawTherapee : ConvertEngine.ImageMagick;
+        optRt.Checked = engine == ConvertEngine.RawTherapee;
+        optIm.Checked = engine == ConvertEngine.ImageMagick;
 
-        // Events
-        btnBrowseInput.Click += (_, __) =>
+        // ---- events ----
+        btnInput.Click += (_, __) =>
         {
-            using var fbd = new FolderBrowserDialog();
-            if (fbd.ShowDialog(this) == DialogResult.OK) txtInputDir.Text = fbd.SelectedPath;
+            var dir = PickFolder("Choose the folder with your ARW photos", txtInput.Text);
+            if (dir != null) txtInput.Text = dir;
         };
-        btnRt.Click += (_, __) => { var p = PickExe("rawtherapee-cli.exe"); if (!string.IsNullOrEmpty(p)) txtRt.Text = p; };
-        btnMagick.Click += (_, __) => { var p = PickExe("magick.exe"); if (!string.IsNullOrEmpty(p)) txtMagick.Text = p; };
-        btnExif.Click += (_, __) => { var p = PickExe("exiftool.exe"); if (!string.IsNullOrEmpty(p)) txtExif.Text = p; };
+        btnOutput.Click += (_, __) =>
+        {
+            var dir = PickFolder("Choose where to save the JPEGs", txtOutput.Text.Length > 0 ? txtOutput.Text : txtInput.Text);
+            if (dir != null) { txtOutput.Text = dir; optFolder.Checked = true; }
+        };
+        btnRt.Click += (_, __) => { var p = PickExe("rawtherapee-cli.exe"); if (p != null) txtRt.Text = p; };
+        btnMagick.Click += (_, __) => { var p = PickExe("magick.exe"); if (p != null) txtMagick.Text = p; };
+        btnExif.Click += (_, __) => { var p = PickExe("exiftool.exe"); if (p != null) txtExif.Text = p; };
+        lnkTools.LinkClicked += (_, __) => ShowToolPaths(!toolPaths.Visible);
+        trkQuality.ValueChanged += (_, __) => lblQuality.Text = trkQuality.Value.ToString();
+        txtInput.TextChanged += (_, __) => RefreshPhotoCount();
+        chkRecurse.CheckedChanged += (_, __) => RefreshPhotoCount();
+        optFolder.CheckedChanged += (_, __) => UpdateOutputEnabled();
+        optRt.CheckedChanged += (_, __) => UpdateToolStatus();
+        txtRt.TextChanged += (_, __) => UpdateToolStatus();
+        txtMagick.TextChanged += (_, __) => UpdateToolStatus();
+        txtExif.TextChanged += (_, __) => UpdateToolStatus();
         btnStart.Click += async (_, __) => await StartAsync();
-        btnCancel.Click += (_, __) => { cts?.Cancel(); Log("Canceling..."); };
-        btnSave.Click += (_, __) => SaveCurrentSettings();
+        btnCancel.Click += (_, __) => { cts?.Cancel(); Log("Canceling..."); SetStatus("Canceling..."); };
+        clockTimer.Tick += (_, __) => { if (runClock != null) tileTime.Shown = FormatTime(runClock.Elapsed); };
         FormClosing += (_, __) => { cts?.Cancel(); SaveCurrentSettings(); };
+        Load += (_, __) =>
+        {
+            // Never open taller or wider than the screen.
+            var area = Screen.FromControl(this).WorkingArea;
+            if (Height > area.Height || Width > area.Width)
+            {
+                Size = new Size(Math.Min(Width, area.Width), Math.Min(Height, area.Height));
+                CenterToScreen();
+            }
+        };
+
+        UpdateOutputEnabled();
+        UpdateToolStatus();
+        ResetTiles();
+        RefreshPhotoCount();
     }
+
+    // ------------------------------------------------------------------
+    //  UI helpers
+    // ------------------------------------------------------------------
+
+    static TextBox NewTextBox(string placeholder) => new()
+    {
+        PlaceholderText = placeholder,
+        BorderStyle = BorderStyle.FixedSingle,
+        Anchor = AnchorStyles.Left | AnchorStyles.Right,
+        Margin = new Padding(0, 2, 0, 2),
+    };
+
+    static CheckBox NewCheck(string text, bool isChecked) => new()
+    {
+        Text = text, Checked = isChecked, AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(0, 4, 0, 0),
+    };
+
+    static RadioButton NewRadio(string text, Font font, bool isChecked) => new()
+    {
+        Text = text, Font = font, Checked = isChecked, AutoSize = true, ForeColor = Theme.Text, Margin = new Padding(0, 4, 0, 0),
+    };
+
+    static Label Hint(string text, int indent = 0) => new()
+    {
+        Text = text, Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true, Margin = new Padding(indent, 1, 0, 2),
+    };
+
+    static Label FieldLabel(string text) => new()
+    {
+        Text = text, AutoSize = false, Size = new Size(104, 30), TextAlign = ContentAlignment.MiddleLeft, ForeColor = Theme.Text, Margin = new Padding(0),
+    };
+
+    // A row of controls, each vertically centred.
+    static TableLayoutPanel HRow(params Control[] items)
+    {
+        var row = new TableLayoutPanel { ColumnCount = items.Length, RowCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0, 2, 0, 2) };
+        row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (int i = 0; i < items.Length; i++)
+        {
+            row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            items[i].Anchor = AnchorStyles.Left;
+            row.Controls.Add(items[i], i, 0);
+        }
+        return row;
+    }
+
+    // A text box that stretches, with a Browse button on the right.
+    static TableLayoutPanel PathRow(TextBox box, Button browse, int indent = 0)
+    {
+        var row = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Dock = DockStyle.Fill, Margin = new Padding(indent, 2, 0, 2) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        row.Controls.Add(box, 0, 0);
+        row.Controls.Add(browse, 1, 0);
+        return row;
+    }
+
+    void AddToolRow(string name, TextBox box, Button browse)
+    {
+        toolPaths.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        toolPaths.RowCount = toolPaths.RowStyles.Count;
+        toolPaths.Controls.Add(FieldLabel(name), 0, toolPaths.RowCount - 1);
+        toolPaths.Controls.Add(PathRow(box, browse), 1, toolPaths.RowCount - 1);
+    }
+
+    void ShowToolPaths(bool show)
+    {
+        toolPaths.Visible = show;
+        lnkTools.Text = show ? "Hide paths" : "Edit paths";
+    }
+
+    void UpdateOutputEnabled()
+    {
+        txtOutput.Enabled = optFolder.Checked;
+        btnOutput.Enabled = optFolder.Checked;
+    }
+
+    void UpdateToolStatus()
+    {
+        bool rtNeeded = optRt.Checked;
+        chipRt.State = File.Exists(txtRt.Text.Trim()) ? ToolChip.ChipState.Found : rtNeeded ? ToolChip.ChipState.Missing : ToolChip.ChipState.NotNeeded;
+        chipMagick.State = File.Exists(txtMagick.Text.Trim()) ? ToolChip.ChipState.Found : !rtNeeded ? ToolChip.ChipState.Missing : ToolChip.ChipState.NotNeeded;
+        chipExif.State = File.Exists(txtExif.Text.Trim()) ? ToolChip.ChipState.Found : ToolChip.ChipState.Missing;
+        if (new[] { chipRt, chipMagick, chipExif }.Any(c => c.State == ToolChip.ChipState.Missing))
+            ShowToolPaths(true);
+    }
+
+    // Counts the ARW files in the chosen folder in the background and shows it as the status.
+    async void RefreshPhotoCount()
+    {
+        if (cts != null) return;
+        var version = ++countVersion;
+        var dir = txtInput.Text.Trim();
+        var option = chkRecurse.Checked ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+        if (dir.Length == 0 || !Directory.Exists(dir)) { SetStatus("Choose the folder with your ARW photos"); return; }
+        SetStatus("Looking for photos...");
+        int count;
+        try { count = await Task.Run(() => Directory.EnumerateFiles(dir, "*.ARW", option).Count()); }
+        catch { count = -1; }
+        if (version != countVersion || cts != null) return;
+        SetStatus(count < 0 ? "Can't read this folder"
+                : count == 0 ? "No ARW photos in this folder"
+                : $"Ready: {count} ARW photo{(count == 1 ? "" : "s")} found");
+    }
+
+    void SetStatus(string text) => lblStatus.Text = text;
+
+    void ResetTiles()
+    {
+        tileDone.Shown = "0";
+        tileSkipped.Shown = "0";
+        tileSaved.Shown = "0 MB";
+        tileSaved.Caption = "Space saved";
+        tileTime.Shown = "0:00";
+    }
+
+    void UpdateTiles(RunStats s)
+    {
+        tileDone.Shown = runTotal > 0 ? $"{s.Converted} / {runTotal}" : s.Converted.ToString();
+        tileSkipped.Shown = s.Skipped.ToString();
+        var saved = Math.Max(0, s.ArwBytes - s.JpgBytes);
+        tileSaved.Shown = FormatSize(saved);
+        tileSaved.Caption = s.ArwBytes > 0 ? $"Saved ({100.0 * saved / s.ArwBytes:0}%)" : "Space saved";
+        if (runClock != null) tileTime.Shown = FormatTime(runClock.Elapsed);
+    }
+
+    void SetRunning(bool running)
+    {
+        btnStart.Enabled = !running;
+        btnCancel.Enabled = running;
+        leftStack.Enabled = !running;
+        if (running) clockTimer.Start(); else clockTimer.Stop();
+    }
+
+    string? PickFolder(string title, string start)
+    {
+        using var dialog = new FolderBrowserDialog { Description = title, UseDescriptionForTitle = true, ShowNewFolderButton = true };
+        if (Directory.Exists(start)) dialog.InitialDirectory = start;
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.SelectedPath : null;
+    }
+
+    string? PickExe(string name)
+    {
+        using var dialog = new OpenFileDialog { Filter = name + "|" + name + "|Programs|*.exe", Title = "Find " + name };
+        return dialog.ShowDialog(this) == DialogResult.OK ? dialog.FileName : null;
+    }
+
+    void Warn(string message) => MessageBox.Show(this, message, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     static string FindTool(string toolsDir, string exe)
     {
@@ -294,27 +911,23 @@ public class MainForm : Form
         return "";
     }
 
-    string PickExe(string title)
-    {
-        using var ofd = new OpenFileDialog { Filter = "Executable|*.exe", Title = "Find " + title };
-        return ofd.ShowDialog(this) == DialogResult.OK ? ofd.FileName : string.Empty;
-    }
-
-    void Warn(string message) => MessageBox.Show(this, message, Text);
+    // ------------------------------------------------------------------
+    //  Conversion
+    // ------------------------------------------------------------------
 
     async Task StartAsync()
     {
         SaveCurrentSettings();
 
-        var input = txtInputDir.Text.Trim();
-        var engine = (ConvertEngine)cboEngine.SelectedIndex;
+        var input = txtInput.Text.Trim();
+        var engine = optRt.Checked ? ConvertEngine.RawTherapee : ConvertEngine.ImageMagick;
         var rt = txtRt.Text.Trim();
         var magick = txtMagick.Text.Trim();
         var exif = txtExif.Text.Trim();
-        if (string.IsNullOrWhiteSpace(input) || !Directory.Exists(input)) { Warn("Select a valid input folder"); return; }
-        if (engine == ConvertEngine.RawTherapee && !File.Exists(rt)) { Warn("rawtherapee-cli.exe not found. Install RawTherapee, or switch the engine to ImageMagick."); return; }
-        if (engine == ConvertEngine.ImageMagick && !File.Exists(magick)) { Warn("magick.exe not found"); return; }
-        if (!File.Exists(exif)) { Warn("exiftool.exe not found"); return; }
+        if (input.Length == 0 || !Directory.Exists(input)) { Warn("Choose the folder with your ARW photos first."); return; }
+        if (engine == ConvertEngine.RawTherapee && !File.Exists(rt)) { Warn("RawTherapee was not found. Install it, set its location under Tools, or choose ImageMagick."); return; }
+        if (engine == ConvertEngine.ImageMagick && !File.Exists(magick)) { Warn("ImageMagick was not found. Install it or set its location under Tools."); return; }
+        if (!File.Exists(exif)) { Warn("ExifTool was not found. Install it or set its location under Tools."); return; }
 
         var profilesDir = "";
         if (engine == ConvertEngine.RawTherapee)
@@ -324,32 +937,70 @@ public class MainForm : Form
             if (missing != null) { Warn("RawTherapee profile not found:\n" + missing); return; }
         }
 
-        int quality = (int)numQuality.Value;
+        var inputRoot = Path.GetFullPath(input);
+        string? outputRoot = null;
+        if (optFolder.Checked)
+        {
+            if (txtOutput.Text.Trim().Length == 0) { Warn("Choose the folder to save the JPEGs in, or pick \"Next to each ARW file\"."); return; }
+            try
+            {
+                outputRoot = Path.GetFullPath(txtOutput.Text.Trim());
+                Directory.CreateDirectory(outputRoot);
+            }
+            catch (Exception ex) { Warn("Can't use that output folder:\n" + ex.Message); return; }
+        }
+
+        bool skipExisting = chkSkip.Checked;
+        int quality = trkQuality.Value;
         int jobs = (int)numJobs.Value;
         var searchOption = chkRecurse.Checked ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
 
-        SetRunning(true);
-        txtLog.Clear();
-        progress.Value = 0;
         cts = new CancellationTokenSource();
         var token = cts.Token;
-        var stats = new RunStats();
-        var clock = Stopwatch.StartNew();
+        var stats = current = new RunStats();
+        runTotal = 0;
+        runClock = Stopwatch.StartNew();
+        txtLog.Clear();
+        progress.Value = 0;
+        ResetTiles();
+        SetRunning(true);
+        SetStatus("Looking for photos...");
         try
         {
-            var files = await Task.Run(() => Directory.EnumerateFiles(input, "*.ARW", searchOption)
+            var files = await Task.Run(() => Directory.EnumerateFiles(inputRoot, "*.ARW", searchOption)
                                                       .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
                                                       .ToList());
-            if (files.Count == 0) { Log("No ARW files found"); return; }
-            progress.Maximum = files.Count;
+            if (files.Count == 0) { Log("No ARW files found."); SetStatus("No ARW photos in this folder"); return; }
+
+            // Work out where each JPEG goes, and leave out the ones that already exist.
+            var work = new List<(string Arw, string Jpg)>();
+            foreach (var arw in files)
+            {
+                var jpg = TargetPath(arw, inputRoot, outputRoot);
+                if (skipExisting && File.Exists(jpg)) stats.Skipped++;
+                else work.Add((arw, jpg));
+            }
+            runTotal = work.Count;
+            progress.Maximum = Math.Max(1, work.Count);
+            UpdateTiles(stats);
+
             Log($"Found {files.Count} ARW files. Engine: {engine}, quality {quality}, {jobs} parallel job(s).");
+            Log(outputRoot == null ? "Saving each JPEG next to its ARW file." : $"Saving JPEGs in {outputRoot}");
+            if (stats.Skipped > 0) Log($"Skipping {stats.Skipped} photo(s) that already have a JPEG.");
+            if (work.Count == 0)
+            {
+                Log("Nothing new to convert.");
+                SetStatus("Nothing new to convert: every photo already has a JPEG");
+                return;
+            }
+            SetStatus($"Converting... 0 of {work.Count}");
 
             Func<string, string, ToolCommand> command;
             string[] metaExclusions;
             if (engine == ConvertEngine.RawTherapee)
             {
                 Log("Reading ISO values to pick RawTherapee's noise profile for each photo...");
-                var isoByFile = await ReadIsoAsync(exif, files, token);
+                var isoByFile = await ReadIsoAsync(exif, work.Select(w => w.Arw).ToList(), token);
                 command = (arw, outFile) => RawTherapeeCommand(rt, profilesDir, isoByFile, arw, outFile, quality);
                 metaExclusions = RawTherapeeMetaExclusions;
             }
@@ -359,37 +1010,62 @@ public class MainForm : Form
                 metaExclusions = Array.Empty<string>();
             }
 
+            bool canceled = false;
             try
             {
                 var options = new ParallelOptions { MaxDegreeOfParallelism = jobs, CancellationToken = token };
-                await Parallel.ForEachAsync(files, options, (arw, ct) => ConvertOneAsync(arw, command, stats, ct));
+                await Parallel.ForEachAsync(work, options, (item, ct) => ConvertOneAsync(item.Arw, item.Jpg, command, stats, ct));
             }
             catch (OperationCanceledException)
             {
+                canceled = true;
                 Log("Canceled. Copying metadata into the files already converted...");
             }
 
-            // One exiftool run for all JPEGs instead of one per file: exiftool's start-up
+            // One exiftool process for all JPEGs instead of one per file: exiftool's start-up
             // time on Windows is often longer than the metadata copy itself.
-            if (!stats.Jpegs.IsEmpty)
-                await CopyMetadataAsync(exif, stats.Jpegs.ToList(), metaExclusions);
+            if (!stats.Pairs.IsEmpty)
+            {
+                SetStatus("Copying photo details (metadata)...");
+                await CopyMetadataAsync(exif, stats.Pairs.ToList(), metaExclusions);
+            }
 
-            LogSummary(stats, clock.Elapsed);
+            LogSummary(stats, runClock.Elapsed);
+            UpdateTiles(stats);
+            SetStatus(canceled
+                ? $"Canceled: {stats.Converted} converted before stopping"
+                : stats.Failed > 0
+                    ? $"Finished with problems: {stats.Converted} converted, {stats.Failed} failed (see log)"
+                    : $"Done: {stats.Converted} converted{(stats.Skipped > 0 ? $", {stats.Skipped} skipped" : "")}");
         }
         catch (OperationCanceledException)
         {
-            Log("Canceled");
+            Log("Canceled.");
+            SetStatus("Canceled");
         }
         catch (Exception ex)
         {
             Log("Error: " + ex.Message);
+            SetStatus("Stopped because of an error (see log)");
         }
         finally
         {
+            runClock?.Stop();
+            UpdateTiles(stats);
             SetRunning(false);
             cts?.Dispose();
             cts = null;
         }
+    }
+
+    // Next to the ARW, or in the output folder with the same subfolder layout as the input.
+    static string TargetPath(string arw, string inputRoot, string? outputRoot)
+    {
+        var name = Path.GetFileNameWithoutExtension(arw) + ".jpg";
+        var arwDir = Path.GetDirectoryName(arw)!;
+        if (outputRoot == null) return Path.Combine(arwDir, name);
+        var relative = Path.GetRelativePath(inputRoot, arwDir);
+        return Path.GetFullPath(Path.Combine(outputRoot, relative, name));
     }
 
     static ToolCommand RawTherapeeCommand(string rt, string profilesDir, Dictionary<string, int> isoByFile,
@@ -403,14 +1079,15 @@ public class MainForm : Form
         return new ToolCommand(rt, args, note);
     }
 
-    async ValueTask ConvertOneAsync(string arw, Func<string, string, ToolCommand> command, RunStats stats, CancellationToken ct)
+    async ValueTask ConvertOneAsync(string arw, string jpg, Func<string, string, ToolCommand> command, RunStats stats, CancellationToken ct)
     {
-        var jpg = Path.ChangeExtension(arw, ".jpg");
+        var dir = Path.GetDirectoryName(jpg)!;
         // Write to a temporary name and rename when complete, so a cancel or crash
         // never leaves a half-written .jpg that looks finished.
-        var partial = Path.ChangeExtension(arw, ".partial.jpg");
+        var partial = Path.Combine(dir, Path.GetFileNameWithoutExtension(jpg) + ".partial.jpg");
         try
         {
+            Directory.CreateDirectory(dir);
             var cmd = command(arw, partial);
             var result = await RunToolAsync(cmd.Exe, cmd.Args, ct);
             if (result.Exit != 0 || !File.Exists(partial))
@@ -426,7 +1103,7 @@ public class MainForm : Form
             Interlocked.Add(ref stats.ArwBytes, arwSize);
             Interlocked.Add(ref stats.JpgBytes, jpgSize);
             Interlocked.Increment(ref stats.Converted);
-            stats.Jpegs.Enqueue(jpg);
+            stats.Pairs.Enqueue((arw, jpg));
 
             var note = cmd.Note.Length > 0 ? $" ({cmd.Note})" : "";
             var warning = "";
@@ -446,7 +1123,12 @@ public class MainForm : Form
         {
             TryDelete(partial);
             var done = Interlocked.Increment(ref stats.Done);
-            Ui(() => progress.Value = Math.Min(done, progress.Maximum));
+            Ui(() =>
+            {
+                progress.Value = done;
+                UpdateTiles(stats);
+                if (cts is { IsCancellationRequested: false }) SetStatus($"Converting... {done} of {runTotal}");
+            });
         }
     }
 
@@ -481,23 +1163,31 @@ public class MainForm : Form
         return map;
     }
 
-    async Task CopyMetadataAsync(string exif, List<string> jpegs, IEnumerable<string> exclusions)
+    // One exiftool process copies the metadata for every pair (one -execute block per photo),
+    // so it works whether the JPEGs are next to the ARWs or in another folder.
+    async Task CopyMetadataAsync(string exif, List<(string Arw, string Jpg)> pairs, string[] exclusions)
     {
-        Log($"Copying metadata into {jpegs.Count} JPEG(s) with one exiftool run...");
+        Log($"Copying metadata into {pairs.Count} JPEG(s) with one exiftool run...");
         var argFile = Path.Combine(Path.GetTempPath(), $"arw2jpg_{Guid.NewGuid():N}.args");
         try
         {
-            // One argument per line. %d%f.ARW = the .ARW with the same name in the same folder.
-            var lines = new List<string> { "-charset", "filename=utf8", "-tagsFromFile", "%d%f.ARW", "-all:all" };
-            lines.AddRange(exclusions);
-            lines.Add("-overwrite_original");
-            lines.AddRange(jpegs);
+            var lines = new List<string>();
+            for (int i = 0; i < pairs.Count; i++)
+            {
+                if (i > 0) lines.Add("-execute");
+                lines.AddRange(new[] { "-charset", "filename=utf8", "-q", "-tagsFromFile", pairs[i].Arw, "-all:all" });
+                lines.AddRange(exclusions);
+                lines.Add("-overwrite_original");
+                lines.Add(pairs[i].Jpg);
+            }
             await File.WriteAllLinesAsync(argFile, lines, Utf8NoBom);
 
             var result = await RunToolAsync(exif, $"-@ \"{argFile}\"", CancellationToken.None);
-            foreach (var line in result.All.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
-                Log("exiftool: " + line.Trim());
-            if (result.Exit != 0) Log("exiftool reported errors (see above)");
+            var messages = result.All.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries)
+                                     .Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+            foreach (var line in messages.Take(40)) Log("exiftool: " + line);
+            if (messages.Count > 40) Log($"exiftool: ...and {messages.Count - 40} more lines");
+            Log(result.Exit == 0 && messages.Count == 0 ? "Metadata copied." : "exiftool reported the messages above.");
         }
         finally
         {
@@ -507,7 +1197,7 @@ public class MainForm : Form
 
     void LogSummary(RunStats s, TimeSpan elapsed)
     {
-        Log($"Finished in {elapsed:hh\\:mm\\:ss}: {s.Converted} converted, {s.Failed} failed.");
+        Log($"Finished in {FormatTime(elapsed)}: {s.Converted} converted, {s.Skipped} skipped, {s.Failed} failed.");
         if (s.ArwBytes > 0)
         {
             var change = 100.0 * (s.ArwBytes - s.JpgBytes) / s.ArwBytes;
@@ -556,21 +1246,18 @@ public class MainForm : Form
         try { return Path.GetFullPath(path.Replace('/', '\\')); } catch { return path; }
     }
 
-    static string FormatSize(long bytes) =>
-        bytes >= 1L << 30 ? $"{bytes / (double)(1L << 30):0.00} GB" : $"{bytes / (double)(1L << 20):0.0} MB";
+    static string FormatSize(long bytes)
+    {
+        double mb = bytes / (double)(1L << 20);
+        return mb >= 1024 ? $"{mb / 1024:0.00} GB" : mb >= 100 ? $"{mb:0} MB" : $"{mb:0.0} MB";
+    }
+
+    static string FormatTime(TimeSpan t) =>
+        t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes}:{t.Seconds:00}";
 
     static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
-    }
-
-    void SetRunning(bool running)
-    {
-        btnStart.Enabled = !running;
-        btnCancel.Enabled = running;
-        foreach (var c in new Control[] { txtInputDir, btnBrowseInput, cboEngine, chkRecurse, numQuality, numJobs,
-                                          txtRt, btnRt, txtMagick, btnMagick, txtExif, btnExif, btnSave })
-            c.Enabled = !running;
     }
 
     void SaveCurrentSettings()
@@ -578,12 +1265,15 @@ public class MainForm : Form
         var set = new AppSettings
         {
             Version = AppSettings.CurrentVersion,
-            Engine = cboEngine.SelectedIndex >= 0 ? ((ConvertEngine)cboEngine.SelectedIndex).ToString() : null,
-            RawTherapeePath = txtRt.Text?.Trim(),
-            MagickPath = txtMagick.Text?.Trim(),
-            ExifPath = txtExif.Text?.Trim(),
-            LastInputDir = txtInputDir.Text?.Trim(),
-            Quality = (int)numQuality.Value,
+            Engine = (optRt.Checked ? ConvertEngine.RawTherapee : ConvertEngine.ImageMagick).ToString(),
+            RawTherapeePath = txtRt.Text.Trim(),
+            MagickPath = txtMagick.Text.Trim(),
+            ExifPath = txtExif.Text.Trim(),
+            LastInputDir = txtInput.Text.Trim(),
+            OutputToFolder = optFolder.Checked,
+            OutputDir = txtOutput.Text.Trim(),
+            SkipExisting = chkSkip.Checked,
+            Quality = trkQuality.Value,
             Recurse = chkRecurse.Checked,
             Jobs = (int)numJobs.Value,
         };
