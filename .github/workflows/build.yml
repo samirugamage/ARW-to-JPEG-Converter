@@ -3,9 +3,13 @@ name: Build WinForms EXE
 on:
   push:
     branches: [ main, dev ]
+    tags: [ 'v*' ]        # pushing a tag like v2.0.0 also publishes a Release
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -23,9 +27,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore
-        run: dotnet restore ArwToJpegGui.csproj
-
+      # One self-contained exe: no .NET install needed on the user's PC.
+      # Compression and bundling the native DLLs make it one ~70 MB file instead of
+      # a ~150 MB exe plus DLLs that were left out of the artifact.
       - name: Publish single file exe
         run: >
           dotnet publish ArwToJpegGui.csproj
@@ -34,11 +38,42 @@ jobs:
           -p:PublishSingleFile=true
           -p:SelfContained=true
           -p:PublishTrimmed=false
+          -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=none
+          -o ../dist
+
+      - name: Add README, licence and batch script
+        shell: pwsh
+        run: Copy-Item ../README.md, ../LICENSE, ../arw-to-jpeg.bat -Destination ../dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ARWtoJPEGGui
-          path: |
-            ArwToJpegGui/bin/Release/net8.0-windows/win-x64/publish/*.exe
-            ArwToJpegGui/bin/Release/net8.0-windows/win-x64/publish/tools/**
+          name: ArwToJpegGui
+          path: dist/
+          if-no-files-found: error
+
+  # Runs only for tags like v2.0.0: zips the build and attaches it to a GitHub Release,
+  # which (unlike an artifact) never expires and can be downloaded without signing in.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: ArwToJpegGui
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ZIP="ArwToJpegGui-${TAG}-win-x64.zip"
+          (cd dist && zip -r "../${ZIP}" .)
+          gh release create "$TAG" "$ZIP" --repo "$GITHUB_REPOSITORY" --title "ARW to JPEG Converter $TAG" --generate-notes

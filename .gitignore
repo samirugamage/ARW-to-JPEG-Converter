@@ -1,0 +1,9 @@
+# Build output
+bin/
+obj/
+dist/
+*.user
+.vs/
+
+# Local app settings written next to the exe
+settings.json

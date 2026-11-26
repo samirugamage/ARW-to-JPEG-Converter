@@ -3,6 +3,13 @@
 This Windows application converts Sony RAW (.ARW) images to space-efficient JPEGs while preserving all metadata from the original files.
 It can use either **RawTherapee** (best look) or **ImageMagick** (fastest) for the conversion, and ExifTool for metadata transfer.
 
+## Download
+
+- **Release (recommended):** open the [Releases page](https://github.com/samirugamage/ARW-to-JPEG-Converter/releases) and download `ArwToJpegGui-<version>-win-x64.zip`.
+- **Latest build:** open the [Actions page](https://github.com/samirugamage/ARW-to-JPEG-Converter/actions), click the newest green run, and download the `ArwToJpegGui` artifact at the bottom. You must be signed in to GitHub, and artifacts are deleted after 90 days.
+
+Unzip it anywhere and run `ArwToJpegGui.exe`. It is a single self-contained file, so you don't need to install .NET. You still need the conversion tools listed under [Prerequisites](#prerequisites).
+
 ## Features
 
 - **Two engines**
@@ -65,7 +72,15 @@ winget install OliverBetz.ExifTool
 - **RawTherapee** is required for the RawTherapee engine: https://rawtherapee.com
 - **ImageMagick** is required for the ImageMagick engine: https://imagemagick.org
 
-To build from source you also need the .NET 8 SDK (`winget install Microsoft.DotNet.SDK.8`), then run `dotnet build -c Release`.
+## Building and releasing
+
+- Every push to `main` builds the exe on GitHub Actions and uploads it as the `ArwToJpegGui` artifact (exe + README + licence + batch script).
+- Pushing a version tag also publishes a Release with the zip attached:
+  ```
+  git tag v2.0.0
+  git push origin v2.0.0
+  ```
+- To build on your own PC you need the .NET 8 SDK (`winget install Microsoft.DotNet.SDK.8`), then run `dotnet build -c Release` in the `ArwToJpegGui` folder.
 
 ## Usage
 
@@ -80,7 +95,7 @@ The app never changes or deletes your ARW files. Keep them until you have checke
 
 ## Command-line version
 
-`arw-to-jpeg.bat` does the ImageMagick conversion with no GUI: put it in the folder with your ARW files, set `EXIFTOOL` and `QUALITY` at the top, and run it.
+`arw-to-jpeg.bat` does the ImageMagick conversion with no GUI: put it in the folder with your ARW files and run it. It saves each JPEG next to its ARW and skips photos that already have one. You can change `QUALITY` (and `EXIFTOOL`, if ExifTool isn't installed with winget) at the top.
 
 ## Notes
 
