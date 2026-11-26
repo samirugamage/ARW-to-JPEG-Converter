@@ -10,6 +10,9 @@ It can use either **RawTherapee** (best look) or **ImageMagick** (fastest) for t
   - **ImageMagick**: plain RAW decode. About 3x faster, flatter and darker look.
 - **Small files, same look**: JPEGs are written at quality 90 with 4:2:0 chroma subsampling (the standard for photos).
 - **Batch conversion**: process entire folders of .ARW files at once, with optional subfolder scanning.
+- **Choose where JPEGs go**: next to each ARW, or in another folder (subfolders are recreated there).
+- **Skip already converted photos**: on by default. Running the same folder again only converts new photos, and existing JPEGs (including the camera's own JPEGs when shooting RAW+JPEG) are never replaced. Turn it off to convert again and replace them.
+- **Clear, modern window**: numbered steps, glossy buttons, live progress with tiles for converted / skipped / space saved / time, and an activity log.
 - **Parallel jobs**: converts several files at once (default: half your CPU cores, max 4).
 - **Metadata preservation**: camera settings, dates, GPS data, lens info, maker notes and other EXIF info are copied from each ARW in one fast ExifTool run.
 - **Size report**: the log shows ARW size -> JPEG size per file, the total saved, and warns if a JPEG came out larger than its ARW.
@@ -67,12 +70,13 @@ To build from source you also need the .NET 8 SDK (`winget install Microsoft.Dot
 ## Usage
 
 1. Launch `ArwToJpegGui.exe`.
-2. Select the folder containing .ARW files.
-3. Pick the engine, whether to include subfolders, the JPEG quality (default 90) and the number of parallel jobs.
-4. Click **Start**.
-5. Check the log for sizes. If any file is flagged as larger than its ARW, lower the quality (e.g. 85).
+2. **Choose photos**: pick the folder containing .ARW files and whether to include subfolders.
+3. **Where to save the JPEGs**: next to each ARW file, or in a folder you choose. Leave "Skip photos that already have a JPEG" on unless you want to redo them.
+4. **Conversion**: pick the engine, JPEG quality (default 90) and number of parallel jobs.
+5. Click **Start converting** and watch the tiles and the activity log.
+6. If any file is flagged as larger than its ARW, lower the quality (e.g. 85).
 
-Keep your ARW files until you have checked a few JPEGs at 100% zoom and confirmed the quality is what you want.
+The app never changes or deletes your ARW files. Keep them until you have checked a few JPEGs at 100% zoom and confirmed the quality is what you want.
 
 ## Command-line version
 
